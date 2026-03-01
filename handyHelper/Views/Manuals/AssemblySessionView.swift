@@ -1,5 +1,7 @@
 import SwiftUI
 import AVFoundation
+import MWDATCamera
+import MWDATCore
 
 struct AssemblySessionView: View {
     let manual: FurnitureManual
@@ -7,7 +9,23 @@ struct AssemblySessionView: View {
     @State private var currentStepIndex = 0
     @Environment(\.dismiss) var dismiss
     
+    // Meta SDK Stream Integration
+    private let streamSession: StreamSession
+    private let detectionService = PartDetectionService()
+    @State private var frameListener: AnyListenerToken?
+    @State private var detectedPartsBuffer: Set<String> = []
+    
     private let synthesizer = AVSpeechSynthesizer()
+    
+    init(manual: FurnitureManual, manager: ManualManager) {
+        self.manual = manual
+        self.manager = manager
+        
+        // Use the default selector to grab the glasses' feed
+        let selector = AutoDeviceSelector(wearables: Wearables.shared)
+        let config = StreamSessionConfig(videoCodec: .raw, resolution: .low, frameRate: 15)
+        self.streamSession = StreamSession(streamSessionConfig: config, deviceSelector: selector)
+    }
     
     var currentStep: AssemblyStep? {
         guard currentStepIndex < manual.steps.count else { return nil }
@@ -102,13 +120,39 @@ struct AssemblySessionView: View {
             }
         }
         .onAppear {
+            startVisionSession()
             speakCurrentStep()
+        }
+        .onDisappear {
+            stopVisionSession()
+        }
+    }
+    
+    private func startVisionSession() {
+        detectionService.delegate = self
+        
+        // Start Meta Camera Stream
+        Task {
+            await streamSession.start()
+            
+            // Tap the frame publisher
+            frameListener = streamSession.videoFramePublisher.listen { frame in
+                detectionService.processFrame(frame)
+            }
+        }
+    }
+    
+    private func stopVisionSession() {
+        Task {
+            await streamSession.stop()
+            frameListener = nil
         }
     }
     
     private func moveNext() {
         if currentStepIndex < manual.steps.count {
             currentStepIndex += 1
+            detectedPartsBuffer.removeAll() // Reset buffer for next step
             speakCurrentStep()
         }
     }
@@ -116,6 +160,7 @@ struct AssemblySessionView: View {
     private func moveBack() {
         if currentStepIndex > 0 {
             currentStepIndex -= 1
+            detectedPartsBuffer.removeAll()
             speakCurrentStep()
         }
     }
@@ -126,7 +171,36 @@ struct AssemblySessionView: View {
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.5
         
-        // This will automatically route to glasses if they are the active audio output
         synthesizer.speak(utterance)
+    }
+}
+
+// MARK: - PartDetectionDelegate (The Validation Engine)
+extension AssemblySessionView: PartDetectionDelegate {
+    func partDetectionService(_ service: PartDetectionService, didDetectParts parts: [String]) {
+        guard let requiredParts = currentStep?.requiredParts, !requiredParts.isEmpty else { return }
+        
+        for part in parts {
+            // Check if the detected part matches any required part for the current step
+            // We use fuzzy matching for MVP (contains)
+            if requiredParts.contains(where: { part.contains($0) }) {
+                if !detectedPartsBuffer.contains(part) {
+                    detectedPartsBuffer.insert(part)
+                    
+                    // Audio Feedback: Confirmation
+                    let feedback = AVSpeechUtterance(string: "I see you found it.")
+                    feedback.rate = 0.6
+                    synthesizer.speak(feedback)
+                    
+                    // Logic: If all required parts are found, auto-advance or signal
+                    // For MVP: Auto-advance after a 2-second delay to let the user finish looking
+                    if detectedPartsBuffer.count >= requiredParts.count {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                            self.moveNext()
+                        }
+                    }
+                }
+            }
+        }
     }
 }

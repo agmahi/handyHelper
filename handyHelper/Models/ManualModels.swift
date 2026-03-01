@@ -6,6 +6,7 @@ struct AssemblyStep: Identifiable, Codable, Hashable {
     let imageName: String? // Name of an asset or a symbol
     var imageData: Data? = nil // Raw extracted image from PDF
     let audioPrompt: String
+    var requiredParts: [String] = [] // e.g. ["dowel", "screw_1104"]
 }
 
 struct FurnitureManual: Identifiable, Codable, Hashable {
