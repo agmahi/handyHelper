@@ -3,204 +3,187 @@ import AVFoundation
 import MWDATCamera
 import MWDATCore
 
+enum AssemblyViewMode: String, CaseIterable {
+    case split = "Split"
+    case pov = "POV"
+    case manual = "Manual"
+}
+
 struct AssemblySessionView: View {
-    let manual: FurnitureManual
-    @ObservedObject var manager: ManualManager
-    @State private var currentStepIndex = 0
+    @StateObject var viewModel: AssemblyViewModel
     @Environment(\.dismiss) var dismiss
-    
-    // Meta SDK Stream Integration
-    private let streamSession: StreamSession
-    private let detectionService = PartDetectionService()
-    @State private var frameListener: AnyListenerToken?
-    @State private var detectedPartsBuffer: Set<String> = []
-    
-    private let synthesizer = AVSpeechSynthesizer()
-    
-    init(manual: FurnitureManual, manager: ManualManager) {
-        self.manual = manual
-        self.manager = manager
-        
-        // Use the default selector to grab the glasses' feed
-        let selector = AutoDeviceSelector(wearables: Wearables.shared)
-        let config = StreamSessionConfig(videoCodec: .raw, resolution: .low, frameRate: 15)
-        self.streamSession = StreamSession(streamSessionConfig: config, deviceSelector: selector)
-    }
-    
-    var currentStep: AssemblyStep? {
-        guard currentStepIndex < manual.steps.count else { return nil }
-        return manual.steps[currentStepIndex]
-    }
+    @State private var viewMode: AssemblyViewMode = .split
     
     var body: some View {
-        VStack(spacing: 30) {
-            // Progress Bar
-            ProgressView(value: Double(currentStepIndex + 1), total: Double(manual.steps.count))
-                .padding()
+        VStack(spacing: 10) {
+            // View Mode Picker
+            Picker("View Mode", selection: $viewMode) {
+                ForEach(AssemblyViewMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(SegmentedPickerStyle())
+            .padding(.horizontal)
+            .animation(.easeInOut, value: viewMode)
             
-            if let step = currentStep {
-                Text("Step \(step.id) of \(manual.steps.count)")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                
-                if let imageData = step.imageData, let uiImage = UIImage(data: imageData) {
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .scaledToFit()
-                        .frame(height: 300)
-                        .cornerRadius(12)
-                        .shadow(radius: 5)
-                        .padding()
-                } else if let imageName = step.imageName {
-                    Image(systemName: imageName)
-                        .font(.system(size: 100))
-                        .foregroundColor(.blue)
-                        .frame(height: 200)
+            // Live POV Preview + Overlay
+            if viewMode == .split || viewMode == .pov {
+                povView
+                    .frame(maxHeight: viewMode == .pov ? .infinity : 250)
+            }
+
+            // Progress Bar
+            ProgressView(value: Double(viewModel.currentStepIndex + 1), total: Double(max(1, viewModel.steps.count)))
+                .padding(.horizontal)
+            
+            if let step = viewModel.currentStep {
+                if viewMode == .split || viewMode == .manual {
+                    manualView(step: step)
+                        .frame(maxHeight: viewMode == .manual ? .infinity : .infinity)
                 }
                 
-                Text(step.instruction)
-                    .font(.title2)
-                    .fontWeight(.bold)
-                    .multilineTextAlignment(.center)
-                    .padding()
-                
-                Spacer()
-                
                 HStack(spacing: 40) {
-                    Button(action: { moveBack() }) {
+                    Button(action: { viewModel.moveBack() }) {
                         Image(systemName: "arrow.left.circle.fill")
                             .font(.system(size: 60))
-                            .foregroundColor(currentStepIndex > 0 ? .blue : .gray)
+                            .foregroundColor(viewModel.currentStepIndex > 0 ? .blue : .gray)
                     }
-                    .disabled(currentStepIndex == 0)
+                    .disabled(viewModel.currentStepIndex == 0)
                     
-                    Button(action: { speakCurrentStep() }) {
+                    Button(action: { viewModel.speakCurrentStep() }) {
                         Image(systemName: "play.circle.fill")
                             .font(.system(size: 80))
                             .foregroundColor(.blue)
                     }
                     
-                    Button(action: { moveNext() }) {
+                    Button(action: { viewModel.moveNext() }) {
                         Image(systemName: "arrow.right.circle.fill")
                             .font(.system(size: 60))
                             .foregroundColor(.blue)
                     }
                 }
-                .padding(.bottom, 50)
+                .padding(.bottom, 20)
             } else {
-                // Completion State
-                VStack(spacing: 20) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 100))
-                        .foregroundColor(.green)
-                    Text("Assembly Complete!")
-                        .font(.title)
-                        .bold()
-                    
-                    Button(action: {
-                        manager.completeAssembly(for: manual)
-                        dismiss()
-                    }) {
-                        Text("Save to History & Exit")
-                            .bold()
-                            .frame(maxWidth: .infinity)
-                            .padding()
-                            .background(Color.green)
-                            .foregroundColor(.white)
-                            .cornerRadius(10)
-                    }
-                    .padding()
-                }
+                completionView
             }
         }
         .navigationBarBackButtonHidden(true)
         .toolbar {
             ToolbarItem(placement: .navigationBarLeading) {
-                Button("Exit") { dismiss() }
-            }
-        }
-        .onAppear {
-            startVisionSession()
-            speakCurrentStep()
-        }
-        .onDisappear {
-            stopVisionSession()
-        }
-    }
-    
-    private func startVisionSession() {
-        detectionService.delegate = self
-        
-        // Start Meta Camera Stream
-        Task {
-            await streamSession.start()
-            
-            // Tap the frame publisher
-            frameListener = streamSession.videoFramePublisher.listen { frame in
-                detectionService.processFrame(frame)
-            }
-        }
-    }
-    
-    private func stopVisionSession() {
-        Task {
-            await streamSession.stop()
-            frameListener = nil
-        }
-    }
-    
-    private func moveNext() {
-        if currentStepIndex < manual.steps.count {
-            currentStepIndex += 1
-            detectedPartsBuffer.removeAll() // Reset buffer for next step
-            speakCurrentStep()
-        }
-    }
-    
-    private func moveBack() {
-        if currentStepIndex > 0 {
-            currentStepIndex -= 1
-            detectedPartsBuffer.removeAll()
-            speakCurrentStep()
-        }
-    }
-    
-    private func speakCurrentStep() {
-        guard let step = currentStep else { return }
-        let utterance = AVSpeechUtterance(string: step.audioPrompt)
-        utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
-        utterance.rate = 0.5
-        
-        synthesizer.speak(utterance)
-    }
-}
-
-// MARK: - PartDetectionDelegate (The Validation Engine)
-extension AssemblySessionView: PartDetectionDelegate {
-    func partDetectionService(_ service: PartDetectionService, didDetectParts parts: [String]) {
-        guard let requiredParts = currentStep?.requiredParts, !requiredParts.isEmpty else { return }
-        
-        for part in parts {
-            // Check if the detected part matches any required part for the current step
-            // We use fuzzy matching for MVP (contains)
-            if requiredParts.contains(where: { part.contains($0) }) {
-                if !detectedPartsBuffer.contains(part) {
-                    detectedPartsBuffer.insert(part)
-                    
-                    // Audio Feedback: Confirmation
-                    let feedback = AVSpeechUtterance(string: "I see you found it.")
-                    feedback.rate = 0.6
-                    synthesizer.speak(feedback)
-                    
-                    // Logic: If all required parts are found, auto-advance or signal
-                    // For MVP: Auto-advance after a 2-second delay to let the user finish looking
-                    if detectedPartsBuffer.count >= requiredParts.count {
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                            self.moveNext()
-                        }
-                    }
+                Button("Exit") {
+                    viewModel.exit()
                 }
             }
         }
+        .onDisappear {
+            viewModel.stopSession()
+        }
+    }
+    
+    private var povView: some View {
+        ZStack {
+            if let image = viewModel.currentPOVFrame {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .overlay(
+                        GeometryReader { geo in
+                            ForEach(viewModel.detections) { detection in
+                                let rect = convert(detection.boundingBox, to: geo.size)
+                                Rectangle()
+                                    .stroke(Color.red, lineWidth: 2)
+                                    .frame(width: rect.width, height: rect.height)
+                                    .offset(x: rect.minX, y: rect.minY)
+                            }
+                        }
+                    )
+            } else if let error = viewModel.streamError {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.red.opacity(0.1))
+                    .overlay(Text(error).foregroundColor(.red).multilineTextAlignment(.center).padding())
+            } else if viewModel.isConnecting {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.black.opacity(0.1))
+                    .overlay(
+                        VStack {
+                            ProgressView()
+                            Text("Connecting to Glasses...").foregroundColor(.secondary).font(.caption).padding(.top, 5)
+                        }
+                    )
+            } else {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.black.opacity(0.1))
+                    .overlay(Text("Waiting for Glasses POV...").foregroundColor(.secondary))
+            }
+        }
+        .cornerRadius(12)
+        .padding(.horizontal)
+    }
+    
+    @ViewBuilder
+    private func manualView(step: AssemblyStep) -> some View {
+        VStack {
+            Text("Step \(step.id) of \(viewModel.steps.count)")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            
+            if let imageData = step.imageData, let uiImage = UIImage(data: imageData) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFit()
+                    .cornerRadius(12)
+                    .shadow(radius: 5)
+                    .padding()
+            } else if let imageName = step.imageName {
+                Image(systemName: imageName)
+                    .font(.system(size: 100))
+                    .foregroundColor(.blue)
+                    .frame(height: 200)
+            }
+            
+            Text(step.instruction)
+                .font(.title2)
+                .fontWeight(.bold)
+                .multilineTextAlignment(.center)
+                .padding()
+            
+            Spacer()
+        }
+    }
+    
+    private var completionView: some View {
+        // Completion State
+        VStack(spacing: 20) {
+            Image(systemName: "checkmark.seal.fill")
+                .font(.system(size: 100))
+                .foregroundColor(.green)
+            Text("Assembly Complete!")
+                .font(.title)
+                .bold()
+            
+            Button(action: {
+                viewModel.manager.completeAssembly(for: viewModel.manual)
+                viewModel.stopSession()
+                dismiss()
+            }) {
+                Text("Save to History & Exit")
+                    .bold()
+                    .frame(maxWidth: .infinity)
+                    .padding()
+                    .background(Color.green)
+                    .foregroundColor(.white)
+                    .cornerRadius(10)
+            }
+            .padding()
+        }
+    }
+    
+    // Helper to convert normalized Vision coordinates to SwiftUI view coordinates
+    private func convert(_ normalizedRect: CGRect, to size: CGSize) -> CGRect {
+        let width = normalizedRect.width * size.width
+        let height = normalizedRect.height * size.height
+        let x = normalizedRect.minX * size.width
+        let y = (1 - normalizedRect.maxY) * size.height
+        return CGRect(x: x, y: y, width: width, height: height)
     }
 }

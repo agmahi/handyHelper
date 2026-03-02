@@ -28,23 +28,8 @@ struct MainAppView: View {
   }
 
   var body: some View {
-    TabView {
-      Group {
-        if viewModel.registrationState == .registered || viewModel.hasMockDevice {
-          StreamSessionView(wearables: wearables, wearablesVM: viewModel)
-        } else {
-          // User not registered - show registration/onboarding flow
-          HomeScreenView(viewModel: viewModel)
-        }
-      }
-      .tabItem {
-        Label("Glasses", systemImage: "sunglasses.fill")
-      }
-      
-      ManualHubView()
-        .tabItem {
-          Label("Manuals", systemImage: "book.fill")
-        }
+    NavigationStack {
+      ManualHubView(wearables: wearables, wearablesVM: viewModel)
     }
   }
 }

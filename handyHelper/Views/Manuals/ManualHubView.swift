@@ -1,14 +1,41 @@
 import SwiftUI
 import PDFKit
+import MWDATCore
 
 struct ManualHubView: View {
+    let wearables: WearablesInterface
+    @ObservedObject var wearablesVM: WearablesViewModel
+    
     @StateObject private var manager = ManualManager()
     @State private var searchText = ""
     
     var body: some View {
-        NavigationStack {
-            List {
-                Section("Search Products") {
+        List {
+            Section("My Glasses") {
+                HStack {
+                    Image(systemName: "sunglasses.fill")
+                        .foregroundColor(wearablesVM.registrationState == .registered ? .green : .orange)
+                    
+                    VStack(alignment: .leading) {
+                        Text(wearablesVM.registrationState == .registered ? "Glasses Connected" : "Glasses Not Linked")
+                            .font(.subheadline).bold()
+                        Text(wearablesVM.registrationState == .registered ? "POV Vision Enabled" : "Tap to link with Meta AI")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                    
+                    Spacer()
+                    
+                    if wearablesVM.registrationState != .registered {
+                        Button("Link") {
+                            wearablesVM.connectGlasses()
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                    }
+                }
+            }
+            
+            Section("Search Products") {
                     HStack {
                         Image(systemName: "magnifyingglass")
                         TextField("Search by name or IKEA ID", text: $searchText)
@@ -19,7 +46,7 @@ struct ManualHubView: View {
                     
                     if !manager.searchResults.isEmpty {
                         ForEach(manager.searchResults) { manual in
-                            NavigationLink(destination: ManualDetailView(manual: manual, manager: manager)) {
+                            NavigationLink(destination: ManualDetailView(manual: manual, manager: manager, wearables: wearables, wearablesVM: wearablesVM)) {
                                 HStack {
                                     Image(systemName: manual.thumbnailImageName ?? "doc.fill")
                                         .foregroundColor(.blue)
@@ -36,7 +63,7 @@ struct ManualHubView: View {
                 if !manager.library.isEmpty {
                     Section("Saved Manuals") {
                         ForEach(manager.library) { manual in
-                            NavigationLink(destination: ManualDetailView(manual: manual, manager: manager)) {
+                            NavigationLink(destination: ManualDetailView(manual: manual, manager: manager, wearables: wearables, wearablesVM: wearablesVM)) {
                                 Label(manual.productName, systemImage: "books.vertical.fill")
                             }
                         }
@@ -61,27 +88,20 @@ struct ManualHubView: View {
             .navigationTitle("Handy Library")
         }
     }
-}
 
 struct ManualDetailView: View {
-    @State var manual: FurnitureManual
-    @ObservedObject var manager: ManualManager
-    @State private var showingAssembly = false
-    @State private var isExtracting = false
+    @StateObject var detailVM: ManualDetailViewModel
+    @ObservedObject var wearablesVM: WearablesViewModel
     @Environment(\.dismiss) var dismiss
     
-    var pdfDocument: PDFDocument? {
-        guard let assetName = manual.pdfAssetName,
-              let dataAsset = NSDataAsset(name: assetName),
-              let document = PDFDocument(data: dataAsset.data) else {
-            return nil
-        }
-        return document
+    init(manual: FurnitureManual, manager: ManualManager, wearables: WearablesInterface, wearablesVM: WearablesViewModel) {
+        _detailVM = StateObject(wrappedValue: ManualDetailViewModel(manual: manual, manager: manager, wearables: wearables))
+        self.wearablesVM = wearablesVM
     }
     
     var body: some View {
         VStack {
-            if let document = pdfDocument {
+            if let document = detailVM.pdfDocument {
                 PDFKitView(document: document)
                     .cornerRadius(12)
                     .padding()
@@ -95,7 +115,7 @@ struct ManualDetailView: View {
                             .foregroundColor(.gray)
                         Text("Instruction Manual")
                             .font(.headline)
-                        Text(manual.id)
+                        Text(detailVM.manual.id)
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -105,16 +125,16 @@ struct ManualDetailView: View {
             }
             
             VStack(spacing: 15) {
-                if isExtracting {
+                if detailVM.isExtracting {
                     ProgressView("Extracting steps with AI Vision...")
                         .padding()
                 } else {
                     Button(action: {
-                        startAssembly()
+                        detailVM.startAssembly()
                     }) {
                         HStack {
                             Image(systemName: "play.fill")
-                            Text("Start Guided Assembly")
+                            Text(wearablesVM.registrationState == .registered ? "Start Guided Assembly" : "Start Manual Assembly")
                         }
                         .bold()
                         .frame(maxWidth: .infinity)
@@ -126,7 +146,7 @@ struct ManualDetailView: View {
                 }
                 
                 Button(action: {
-                    manager.completeAssembly(for: manual)
+                    detailVM.manager.completeAssembly(for: detailVM.manual)
                     dismiss()
                 }) {
                     Text("Quick Mark as Assembled")
@@ -136,41 +156,16 @@ struct ManualDetailView: View {
             }
             .padding()
         }
-        .navigationTitle(manual.productName)
-        .fullScreenCover(isPresented: $showingAssembly) {
+        .navigationTitle(detailVM.manual.productName)
+        .fullScreenCover(isPresented: $detailVM.showingAssembly) {
             NavigationStack {
-                AssemblySessionView(manual: manual, manager: manager)
+                AssemblySessionView(viewModel: AssemblyViewModel(manual: detailVM.manual, manager: detailVM.manager, wearables: detailVM.wearables, onDismiss: {
+                    detailVM.showingAssembly = false
+                }))
             }
         }
         .onAppear {
-            manager.addToLibrary(manual)
-        }
-    }
-    
-    private func startAssembly() {
-        if manual.steps.isEmpty, let document = pdfDocument {
-            isExtracting = true
-            Task {
-                do {
-                    let extractor = InstructionExtractionService()
-                    let extractedSteps = try await extractor.extractSteps(from: document)
-                    
-                    await MainActor.run {
-                        self.manual.steps = extractedSteps
-                        self.isExtracting = false
-                        self.showingAssembly = true
-                    }
-                } catch {
-                    await MainActor.run {
-                        self.isExtracting = false
-                        print("Failed to extract steps: \(error)")
-                        // Even if extraction fails, start with empty steps or mock
-                        self.showingAssembly = true
-                    }
-                }
-            }
-        } else {
-            showingAssembly = true
+            detailVM.manager.addToLibrary(detailVM.manual)
         }
     }
 }
