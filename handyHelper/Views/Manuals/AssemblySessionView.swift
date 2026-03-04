@@ -90,10 +90,19 @@ struct AssemblySessionView: View {
                         GeometryReader { geo in
                             ForEach(viewModel.detections) { detection in
                                 let rect = convert(detection.boundingBox, to: geo.size)
-                                Rectangle()
-                                    .stroke(Color.red, lineWidth: 2)
-                                    .frame(width: rect.width, height: rect.height)
-                                    .offset(x: rect.minX, y: rect.minY)
+                                ZStack(alignment: .topLeading) {
+                                    Rectangle()
+                                        .stroke(Color.red, lineWidth: 2)
+                                        .frame(width: rect.width, height: rect.height)
+                                    
+                                    Text(detection.label)
+                                        .font(.caption)
+                                        .bold()
+                                        .foregroundColor(.white)
+                                        .padding(4)
+                                        .background(Color.red)
+                                }
+                                .offset(x: rect.minX, y: rect.minY)
                             }
                         }
                     )
