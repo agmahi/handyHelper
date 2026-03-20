@@ -1,11 +1,14 @@
 # Project Context
 
 ## Definition
-- [Product Definition](./product.md)
+- [Product Definition](../PRODUCT_SPEC.md)
 - [Product Guidelines](./product-guidelines.md)
-- [Tech Stack](./tech-stack.md)
+- [Architecture Decisions](../ARCHITECTURE_DECISIONS.md)
+- [Technical Documentation](../DOCUMENTATION.md)
 
-## Workflow
+## Development
+- [Claude Code Guide](../CLAUDE.md)
+- [YOLO Export Guide](../EXPORT_YOLO.md)
 - [Workflow](./workflow.md)
 - [Code Style Guides](./code_styleguides/)
 
