@@ -32,9 +32,18 @@ struct AssemblySessionView: View {
                     .frame(maxHeight: viewMode == .pov ? .infinity : 250)
             }
 
-            // Progress Bar
-            ProgressView(value: Double(viewModel.currentStepIndex + 1), total: Double(max(1, viewModel.steps.count)))
-                .padding(.horizontal)
+            // Progress Bar & Listening Indicator
+            HStack {
+                ProgressView(value: Double(viewModel.currentStepIndex + 1), total: Double(max(1, viewModel.steps.count)))
+                    .padding(.horizontal)
+                
+                if viewModel.speechService.isListening {
+                    Image(systemName: "mic.fill")
+                        .foregroundColor(.green)
+                        .padding(.trailing)
+                        .opacity(0.8)
+                }
+            }
             
             if let step = viewModel.currentStep {
                 if viewMode == .split || viewMode == .manual {

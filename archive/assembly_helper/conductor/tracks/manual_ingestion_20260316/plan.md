@@ -1,10 +1,10 @@
 # Implementation Plan: Implement and Test Manual Ingestion Flow
 
 ## Phase 1: Core Implementation
-- [ ] Task: Implement Instruction Extraction Logic
-    - [ ] Define `AssemblyStep` model in `ManualModels.swift`.
-    - [ ] Implement `InstructionExtractionService` to parse instruction JSON.
-- [ ] Task: Integrate with ManualManager
+- [x] Task: Implement Instruction Extraction Logic
+    - [x] Define `AssemblyStep` model in `ManualModels.swift`.
+    - [x] Implement `InstructionExtractionService` to parse instruction JSON.
+- [~] Task: Integrate with ManualManager
     - [ ] Update `ManualManager` to persist and retrieve manuals.
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Core Implementation' (Protocol in workflow.md)
 

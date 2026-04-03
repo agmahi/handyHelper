@@ -7,7 +7,7 @@ HandyHelper is built on the Meta Wearables Device Access Toolkit (DAT) SDK. It f
 ### Core Frameworks:
 - **MWDATCore**: Manages device identity, discovery, and registration (OAuth).
 - **MWDATCamera**: Handles high-performance media streaming and photo capture.
-- **MWDATMockDevice**: Provides simulation capabilities for development without physical hardware.
+- **CoreML & Vision**: Powers the SOTA "Dual Pipeline" (Donut for documents, YOLOv8 for real-time tracking).
 
 ---
 
@@ -22,17 +22,20 @@ The entry point of the application.
 - **`WearablesViewModel`**: 
   - Tracks the global state of the wearable system.
   - Monitors `registrationState` (.registered, .registering, .unregistered).
-  - Maintains a list of available `devices`.
-  - Handles the triggers for starting and stopping the Meta AI registration handshake.
-- **`StreamSessionViewModel`**:
-  - Manages the lifecycle of a specific camera session.
-  - Converts raw SDK `VideoFrame` data into `UIImage` for SwiftUI display.
-  - Handles photo capture logic and error formatting.
+- **`AssemblyViewModel`**:
+  - Manages the lifecycle of a specific manual assembly session.
+  - Subscribes to the live 24fps camera feed via `activeDeviceStream`.
+  - Coordinates the state machine (moving between steps) based on inputs from the `PartDetectionService`.
+- **`ManualDetailViewModel`**:
+  - Handles the offline pre-processing of PDFs using `InstructionExtractionService`.
 
-### C. Views (The "Body")
-- **`MainAppView`**: Acts as a state-driven router. If not registered, shows `HomeScreenView`; if registered, shows `StreamSessionView`.
-- **`RegistrationView`**: An invisible background view that listens for deep links (`handyhelper://`) via `.onOpenURL` to complete the OAuth handshake.
-- **`StreamView`**: Renders the live POV feed using standard SwiftUI `Image` components updated at 24fps.
+### C. Services (The ML Pipeline)
+- **`LocalDocumentTransformer`**: Loads an `.mlpackage` (Donut) to intelligently extract JSON steps from visual IKEA manual diagrams without cloud APIs.
+- **`PartDetectionService`**: Dynamically loads a YOLOv8 CoreML model to detect objects in the 24fps POV stream. Falls back to Apple Vision OCR if the model is missing. Safely dispatches all results to the `MainActor`.
+
+### D. Views (The "Body")
+- **`ManualHubView`**: The unified starting point. Shows the library of manuals and dynamically updates UI based on glasses connectivity.
+- **`AssemblySessionView`**: The core AR Copilot interface. Features a dynamic layout picker (Split, POV, Manual) allowing the user to dedicate screen real estate to the live camera feed (with YOLO bounding boxes) or the PDF diagram.
 
 ---
 
@@ -59,22 +62,24 @@ sequenceDiagram
     HandyHelper->>User: Show Camera Stream
 ```
 
-### Flow 2: Live POV Streaming
-Once registered, this flow details how frames move from the glasses to the phone screen.
+### Flow 2: Live POV Streaming & SOTA Object Detection
+Once registered, this flow details how frames move from the glasses to the YOLOv8 model.
 
 ```mermaid
 sequenceDiagram
     participant Glasses
     participant WearablesSDK
-    participant StreamSessionVM
-    participant StreamView
+    participant AssemblyVM
+    participant YOLOv8
+    participant AssemblyView
 
-    StreamSessionVM->>WearablesSDK: session.start()
-    Glasses->>WearablesSDK: Raw Video Packets
-    WearablesSDK->>StreamSessionVM: VideoFrame (Publisher)
-    StreamSessionVM->>StreamSessionVM: frame.makeUIImage()
-    StreamSessionVM->>StreamView: Update currentVideoFrame (@Published)
-    StreamView->>StreamView: Re-render SwiftUI Image
+    AssemblyVM->>WearablesSDK: session.start()
+    Glasses->>WearablesSDK: Raw Video Packets (24fps)
+    WearablesSDK->>AssemblyVM: VideoFrame (Publisher)
+    AssemblyVM->>YOLOv8: processFrame(frame)
+    YOLOv8-->>AssemblyVM: [Detections] (MainActor)
+    AssemblyVM->>AssemblyView: Update currentPOVFrame & detections
+    AssemblyView->>AssemblyView: Render Image + Red Bounding Boxes
 ```
 
 ---
@@ -91,11 +96,11 @@ videoFrameListenerToken = streamSession.videoFramePublisher.listen { frame in
     // Real-time frame processing
 }
 ```
-This allows multiple parts of the app to "tap" into the camera feed (e.g., one for UI display, one for our future Furniture Vision Service).
+This allows multiple parts of the app to "tap" into the camera feed (e.g., one for UI display, one for our YOLOv8 Vision Service).
 
 ---
 
 ## 5. Security & Privacy
 - **OAuth 2.0**: The registration flow ensures HandyHelper never sees the user's Meta credentials.
 - **Encryption**: The video stream is encrypted end-to-end between the glasses and the phone.
-- **Privacy Keys**: The app strictly adheres to iOS privacy requirements via `NSCameraUsageDescription` and `NSBluetoothAlwaysUsageDescription`.
+- **Local Inference**: The Donut document extraction and YOLOv8 part detection run 100% locally on the device's Neural Engine. No images are sent to the cloud, ensuring maximum user privacy.

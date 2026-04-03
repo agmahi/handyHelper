@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-HandyHelper is an iOS app that creates an "expert over your shoulder" experience using Meta Ray-Ban Smart Glasses. The MVP focuses on furniture assembly guidance (IKEA products) but is architected to support multiple use-cases (cooking, workouts, etc.).
+CardMax is an iOS app that leverages Meta Ray-Ban Smart Glasses to help users maximize credit card rewards. It provides on-demand, hands-free recommendations for the best card to use at checkout, whether shopping in-person or online.
 
-**Core Value Proposition:** Hands-free, audio-first AR guidance using POV vision from Meta glasses to provide real-time contextual feedback during physical tasks.
+**Core Value Proposition:** Siri-activated rewards optimization with audio feedback through Meta glasses. Users say "Which card?" via Siri, and the app identifies the merchant and recommends the optimal card from the household's portfolio.
 
 ## Development Environment
 
@@ -27,44 +27,41 @@ xcodebuild -project handyHelper.xcodeproj -scheme handyHelper -configuration Deb
 
 ### Testing
 
-The project currently uses mock data for testing the core assembly loop without requiring actual IKEA furniture or custom ML models. Look for `MockData` and test assembly sessions in `InstructionExtractionService.swift:26-62`.
+The project uses mock card data and merchant templates for testing the recommendation loop. Assembly-related code has been moved to `archive/assembly_helper/`.
 
-## Architecture: "Dual Pipeline" System
+## Architecture
 
-The codebase follows a strict separation between two processing streams:
+### Activation via Siri App Intents
 
-### Pipeline A: "The Brain" (Static Manual Processing)
-**Location:** `handyHelper/Services/Manuals/`
+CardMax uses **Siri App Intents** (not in-app voice recognition) for activation. The user triggers recommendations by asking Siri "Which card at [merchant/category]?" This avoids battery drain from continuous audio monitoring and prevents OOM crashes that occurred with the previous `SFSpeechRecognizer`-based `VoiceTriggerService`.
 
-- **Purpose:** Convert 2D PDF manuals into structured JSON steps
-- **Strategy:** Offline GPT-4o Vision API → Firebase/Local JSON (not cloud-processed on-device)
-- **Status:** Currently using mock data (`InstructionExtractionService.extractSteps()`)
-- **Next Step:** See `conductor/tracks/manual_ingestion_20260316/` for implementation plan
+**Key Pattern:**
+- `AppShortcutsProvider` registers intents with Siri
+- App Intents call into `CardMaxViewModel.recommendForMerchantName(_:)` or `recommendForCategory(_:)`
+- Audio response is delivered through Meta glasses via `AudioResponseService`
+
+### Detection & Recommendation Pipeline
+**Location:** `handyHelper/CardMax/Services/`
+
+- **Recommendation Engine:** `RecommendationEngine.swift` matches merchants/categories against the user's card portfolio to find the highest reward rate. Supports merchant-specific bonuses, category rewards, and rotating quarterly categories. Owner-aware — recommends across household cards.
+- **Visual Detection (planned):** POV frame capture from Meta glasses for merchant logo/text recognition.
+- **Location Detection (planned):** GPS + Google Places API as fallback for physical stores.
 
 **Key Files:**
-- `InstructionExtractionService.swift` - Parses JSON or generates mock steps
-- `ManualManager.swift` - Handles library, search, and persistence (UserDefaults)
-- `ManualModels.swift` - Core data structures (`AssemblyStep`, `FurnitureManual`)
-
-### Pipeline B: "The Eyes" (Real-Time Vision)
-**Location:** `handyHelper/Services/Vision/PartDetectionService.swift`
-
-- **Purpose:** Process 24fps POV stream from Meta glasses to detect parts
-- **Technology:** YOLOv8 via CoreML (currently using pre-trained COCO model)
-- **Fallback:** Apple Vision OCR + rectangle detection if YOLO model missing
-- **Performance:** Runs on Apple Neural Engine (ANE), must dispatch to `@MainActor`
-
-**How it Works:**
-1. `PartDetectionService` receives `VideoFrame` from `AssemblyViewModel`
-2. Runs Vision framework requests (YOLO or OCR+rectangles)
-3. Returns `Detection` array via delegate pattern to avoid blocking UI
-4. Detections trigger audio feedback ("I see you found it")
+- `handyHelper/CardMax/Models/CreditCard.swift` - Card model with reward structures, rotating categories, and multi-owner support.
+- `handyHelper/CardMax/Models/Merchant.swift` - Merchant definitions with category mapping and keyword matching.
+- `handyHelper/CardMax/Models/Receipt.swift` - Receipt capture model with image persistence.
+- `handyHelper/CardMax/Services/RecommendationEngine.swift` - Core reward calculation and card selection logic.
+- `handyHelper/CardMax/Services/CardMaxService.swift` - Orchestrates detection pipeline and glasses camera.
+- `handyHelper/CardMax/Services/AudioResponseService.swift` - TTS with premium voice selection.
+- `handyHelper/CardMax/Services/CardStorageService.swift` - JSON persistence for user's card portfolio.
+- `handyHelper/CardMax/Services/ReceiptStorageService.swift` - JSON persistence for receipt metadata and images.
 
 ## Meta Wearables SDK Integration
 
 ### Critical SDK Lifecycle Pattern
 
-The Meta DAT SDK is **highly sensitive to initialization order**. Follow this exact pattern:
+The Meta DAT SDK is highly sensitive to initialization order. Follow this exact pattern:
 
 ```swift
 // 1. Configure SDK before ANY other usage (in App.init)
@@ -73,7 +70,7 @@ try Wearables.configure()
 // 2. Use AutoDeviceSelector (not manual device selection)
 let deviceSelector = AutoDeviceSelector(wearables: wearables)
 
-// 3. Create StreamSession ONCE in ViewModel.init (not in onAppear)
+// 3. Create StreamSession ONCE in ViewModel.init
 let streamSession = StreamSession(streamSessionConfig: config, deviceSelector: deviceSelector)
 
 // 4. Use activeDeviceStream() - stream auto-starts when glasses detected
@@ -91,37 +88,22 @@ if status == .granted {
 ```
 
 **Common Pitfalls:**
-- ❌ Calling `streamSession.start()` in `onAppear` → black screen hang
-- ❌ Creating multiple `StreamSession` instances → crashes
-- ❌ Not gating stream behind permission check → silent failures
-- ✅ Use listener tokens for frame/state updates: `streamSession.videoFramePublisher.listen { }`
+- Calling `streamSession.start()` in `onAppear` leads to black screen hang.
+- Creating multiple `StreamSession` instances causes crashes.
+- Use listener tokens for frame updates: `streamSession.videoFramePublisher.listen { }`.
 
-**Reference Implementation:** `AssemblyViewModel.swift:32-104`
-
-### Registration Flow
-
-Users must authorize the app via Meta AI before accessing camera:
-
-1. App calls `wearables.startRegistration()`
-2. Meta AI app opens via Universal Link
-3. User approves in Meta AI
-4. Meta AI redirects back via `handyhelper://` URL scheme
-5. App handles via `.onOpenURL` in `CameraAccessApp.swift`
-
-## Audio & Voice Control
+## Audio Response
 
 ### Text-to-Speech (TTS)
-- **Framework:** `AVSpeechSynthesizer` (routes through Bluetooth HFP to glasses speakers)
-- **Pattern:** Always delay TTS by 2-3 seconds after stream starts to avoid overlapping with Meta's "Experience Started" hardware prompt
-- **Location:** `AssemblyViewModel.speakCurrentStep()`
+- **Framework:** `AVSpeechSynthesizer` with premium voice selection (sorted by `quality.rawValue`).
+- **Routing:** Audio plays through Bluetooth to glasses speakers when connected, falls back to phone speaker.
+- **Function:** Delivers natural language recommendations like "Use your Amex Gold, 4% back on groceries."
+- **Implementation:** `handyHelper/CardMax/Services/AudioResponseService.swift`
 
-### Voice Commands
-- **Framework:** `SFSpeechRecognizer` (Apple's on-device speech recognition)
-- **Commands:** "Next", "Back", "Repeat"
-- **Delegate Pattern:** `SpeechRecognizerDelegate` in `AssemblyViewModel`
-- **Anti-Loop Logic:** Only start listening AFTER TTS finishes speaking to prevent the app from transcribing its own voice
-
-**Implementation:** `handyHelper/Services/SpeechRecognizerService.swift`
+### Voice Activation (Siri)
+- **Framework:** Apple App Intents / `AppShortcutsProvider`.
+- **Triggers:** "Which card at [merchant]?", "Which card for [category]?"
+- **Note:** The previous in-app `VoiceTriggerService` (SFSpeechRecognizer) was removed due to OOM crashes from continuous audio monitoring. The file still exists but is not used by CardMax.
 
 ## State Management & Concurrency
 
@@ -130,83 +112,52 @@ Users must authorize the app via Meta AI before accessing camera:
 **CRITICAL:** All UI updates and SDK delegate callbacks MUST be dispatched to `@MainActor`:
 
 ```swift
-// Vision results come from background threads
+// Results from background detection services
 Task { @MainActor in
-    self.delegate?.partDetectionService(self, didUpdateDetections: allDetections)
+    self.currentRecommendation = bestCard
 }
 ```
 
 ### ViewModel Pattern
 
-- All ViewModels are `@MainActor` classes conforming to `ObservableObject`
-- Use `@Published` properties for SwiftUI reactivity
-- Complex async operations use `Task { }` blocks
-- Store `Task` references to cancel on `deinit`
-
-**Key ViewModels:**
-- `WearablesViewModel` - Global glasses connection state, registration
-- `AssemblyViewModel` - Session-specific assembly logic, stream management
-- `ManualDetailViewModel` - Manual preview and step extraction
+- All ViewModels are `@MainActor` classes conforming to `ObservableObject`.
+- Use `@Published` properties for SwiftUI reactivity.
+- Complex async operations (Visual/Location detection) use `Task { }` blocks.
 
 ## Project Structure
 
 ```
 handyHelper/
-├── CameraAccessApp.swift          # App entry point, SDK configuration
-├── ViewModels/                    # MVVM pattern - business logic
-│   ├── WearablesViewModel.swift   # Global device management
-│   ├── AssemblyViewModel.swift    # Assembly session orchestration
-│   └── ManualDetailViewModel.swift
-├── Views/                         # SwiftUI views
-│   ├── MainAppView.swift          # Root navigation
-│   ├── Manuals/
-│   │   ├── ManualHubView.swift    # Manual library & search
-│   │   └── AssemblySessionView.swift # Core AR guidance UI
-│   └── Components/                # Reusable UI components
+├── CameraAccessApp.swift              # App entry point, SDK configuration
+├── CardMax/
+│   ├── Models/
+│   │   ├── CreditCard.swift           # Card model, rotating schedules, presets, catalog
+│   │   ├── Merchant.swift             # Merchant definitions and keyword matching
+│   │   └── Receipt.swift              # Receipt capture model with image persistence
+│   ├── Services/
+│   │   ├── CardMaxService.swift       # Detection pipeline orchestrator, glasses camera
+│   │   ├── RecommendationEngine.swift # Reward calculation, owner-aware card selection
+│   │   ├── AudioResponseService.swift # TTS with premium voice selection
+│   │   ├── CardStorageService.swift   # JSON persistence for card portfolio
+│   │   ├── ReceiptStorageService.swift# JSON persistence for receipts
+│   │   └── VoiceTriggerService.swift  # (Legacy — not used, kept for reference)
+│   ├── ViewModels/
+│   │   └── CardMaxViewModel.swift     # State machine, card/receipt management
+│   └── Views/
+│       ├── CardMaxView.swift          # Main UI — wallet, quick glance, receipts
+│       ├── AddCardView.swift          # Searchable card catalog grouped by issuer
+│       └── ImagePicker.swift          # UIImagePickerController wrapper
 ├── Services/
-│   ├── Manuals/                   # Pipeline A (document processing)
-│   │   ├── InstructionExtractionService.swift
-│   │   ├── ManualManager.swift
-│   │   └── LocalDocumentTransformer.swift (planned)
-│   ├── Vision/
-│   │   └── PartDetectionService.swift # Pipeline B (real-time ML)
-│   └── SpeechRecognizerService.swift
-└── Models/
-    └── ManualModels.swift         # Core data structures
-
-conductor/tracks/                  # Project planning & execution tracks
-├── tracks.md                      # Active tracks index
-└── manual_ingestion_20260316/     # Current work: GPT-4o manual processing
+│   └── SpeechRecognizerService.swift  # Shared speech infrastructure
+├── ViewModels/
+│   ├── WearablesViewModel.swift       # SDK/Device management
+│   └── StreamSessionViewModel.swift
+├── Views/
+│   ├── MainAppView.swift              # Root navigation
+│   └── HomeScreenView.swift
+└── archive/
+    └── assembly_helper/               # Former IKEA assembly code
 ```
-
-## Adding ML Models
-
-### YOLOv8 CoreML Integration
-
-1. Train YOLOv8 model (or use pre-trained)
-2. Export as CoreML: `model.export(format="coreml")`
-3. Add `.mlpackage` or compiled `.mlmodelc` to Xcode project
-4. `PartDetectionService` auto-detects model named "yolov8n" in bundle
-5. If missing, gracefully falls back to Vision OCR
-
-**Current Status:** Using COCO-trained YOLOv8 as proof-of-concept. Custom IKEA parts model pending (see `PRODUCT_SPEC.md:42` for dataset strategy).
-
-## Key Design Decisions
-
-### Why Offline Manual Processing?
-Standard OCR fails on IKEA's visual diagrams (arrows, spatial relationships). GPT-4o Vision understands visual context but is expensive/slow. Solution: Process manuals offline once, serve perfect JSON instantly.
-
-### Why Audio-First?
-Users' hands are busy during assembly. Voice commands + audio feedback enables true hands-free operation. Meta glasses provide open-ear audio without blocking ambient sound.
-
-### Why Limit to 10 Products?
-Vertical slice strategy guarantees 100% accuracy. Better to excel at 10 manuals than provide mediocre guidance for 1000+. Validates core loop before scaling.
-
-## Important Documentation Files
-
-- `PRODUCT_SPEC.md` - Business context, technical pipeline, MVP scope
-- `ARCHITECTURE_DECISIONS.md` - ADR log, SDK patterns, historical decisions
-- `DOCUMENTATION.md` - Detailed technical docs, sequence diagrams, security notes
 
 ## Meta SDK Dependencies
 
@@ -221,116 +172,93 @@ MetaWearablesDAT: https://github.com/facebook/meta-wearables-dat-ios @ 0.4.0
 - `MWDATCamera` - Video streaming, photo capture
 - `MWDATMockDevice` - DEBUG-only simulated glasses
 
+## Adding ML Models
+
+### Merchant Logo Recognition (YOLOv8)
+
+1. Train YOLOv8 model on top 50 merchant logos.
+2. Export as CoreML `.mlpackage`.
+3. Add to `handyHelper/CardMax/Resources/`.
+4. The visual detection service uses these models to identify merchants from POV frames.
+5. If models are missing, the system gracefully falls back to OCR and Google Places API.
+
+## Key Design Decisions
+
+### Siri-Only Activation (No In-App Voice Trigger)
+The original `VoiceTriggerService` used continuous `SFSpeechRecognizer` listening, which caused OOM crashes from persistent audio engine taps and recursive restart loops. CardMax now uses Siri App Intents exclusively — zero battery impact when idle, and the OS handles all voice recognition.
+
+### Hybrid Detection (Planned)
+Visual detection will be the primary method (supports online shopping via URL/logo detection on laptop screens). Location-based detection via GPS + Google Places serves as fallback for physical stores. Currently, recommendations are triggered by merchant name or category via Siri.
+
+### Audio-First Response
+Users are often at a checkout counter with hands full. Natural language audio delivered through the glasses provides a seamless experience without requiring the user to look at their phone.
+
+### Multi-Owner Household Support
+Cards have an `owner` field (defaults to "Me") so users can track a spouse's or family member's cards. The recommendation engine considers all household cards and prefixes the owner name in audio responses when recommending someone else's card.
+
+### Rotating Category Schedules
+Cards like Discover it and Chase Freedom Flex have quarterly rotating 5% categories. These are modeled as `RotatingSchedule` structs with hardcoded quarterly data. The `effectiveCategoryRewards` computed property merges static and active rotating rates at query time.
+
+### On-Demand Frame Listener
+The Meta SDK frame listener (`videoFramePublisher`) is started only when needed (photo capture) and stopped immediately after. Persistent listeners at 10 FPS caused OOM crashes from continuous UIImage conversion.
+
+## Important Documentation Files
+
+- `PRODUCT_SPEC.md` - Product vision, feature scope, and hybrid detection logic.
+- `ARCHITECTURE.md` - Detailed technical system design and data models.
+- `MILESTONES.md` - Development roadmap and execution plan.
+
+## Next Implementation Priorities
+
+1. **Visual Detection (Milestone 2)**
+   - Train YOLOv8 logo detection model for top merchants.
+   - Implement frame capture and OCR pipeline from glasses POV.
+
+2. **Real-World Testing (Milestone 6)**
+   - Test Siri App Intents with physical glasses connected.
+   - Validate audio routing through glasses speakers.
+   - Test receipt capture from all three sources (glasses, phone camera, photo library).
+
 ## Debug Mode Features
 
 When running DEBUG builds:
 
 - Mock device simulator available (shake device to access debug menu)
-- Extensive logging via `NSLog`
-- Test assembly sessions without physical glasses
-- Mock steps use common objects (cell phone, cup, keyboard) for easy testing
-
-## Next Implementation Priorities
-
-Based on current git status and conductor tracks:
-
-1. **Manual Ingestion Pipeline** (`conductor/tracks/manual_ingestion_20260316/`)
-   - Implement GPT-4o Vision prompt for manual extraction
-   - Set up Firebase JSON hosting
-   - Build human review workflow
-
-2. **State Machine Robustness** (`AssemblyViewModel`)
-   - Handle non-linear step navigation
-   - Add session persistence (pause/resume)
-   - Implement error recovery
-
-3. **Custom YOLOv8 Training**
-   - Download IKEA parts dataset from Roboflow
-   - Train on cloud GPU (Colab Pro)
-   - Export and integrate `.mlpackage`
+- Test recommendation flow without physical glasses
+- Mock merchants and card data for rapid iteration
 
 ## Common Gotchas
 
-1. **Black Screen on Stream Start:** You likely called `streamSession.start()` before the device was ready. Use `activeDeviceStream()` instead.
-
-2. **App Transcribing Its Own Voice:** Speech recognizer starts too early. Ensure TTS finishes before calling `speechService.startListening()`.
-
-3. **Vision Detections Not Appearing:** Check that delegate is set AND you're dispatching to `@MainActor`.
-
-4. **Build Fails with YOLO Model Missing:** Normal. `PartDetectionService` gracefully falls back to OCR if model not found.
-
-5. **Stream Session Crashes:** Never create multiple `StreamSession` instances. Create once in ViewModel.init, reuse throughout lifecycle.
+1. **Black Screen on Stream Start:** Ensure `streamSession.start()` is only called after the device is confirmed as ready via `activeDeviceStream()`.
+2. **Audio Routing:** Recommendations should play through the glasses; ensure the audio session is configured for `.playAndRecord` with `.allowBluetooth` and `.defaultToSpeaker`.
+3. **Detection Latency:** Parallelize visual and location detection to keep total response time under 2 seconds.
+4. **Stream Session Crashes:** Never create multiple `StreamSession` instances. Create once in ViewModel.init, reuse throughout lifecycle.
+5. **OOM from Frame Listeners:** Never leave `videoFramePublisher.listen` running persistently. Use `startFrameListener()`/`stopFrameListener()` around capture operations only.
+6. **Connection Status:** Use `activeDeviceStream()` (not `devicesStream()`) to detect actually connected glasses. `devicesStream()` returns paired devices even when offline.
+7. **Audio Tap Crashes:** When using `AVAudioEngine`, track whether a tap is installed with a boolean flag before calling `removeTap(onBus:)`. Removing a nonexistent tap crashes.
+8. **Photo Capture Continuation:** Use a `didResume` flag with `withCheckedContinuation` in `capturePhoto()` to prevent double-resume from the `photoDataPublisher`.
 
 ## Using Gemini CLI for Large Codebase Analysis
 
-When analyzing large codebases or multiple files that might exceed context limits, use the Gemini CLI with its massive context window.
+Use the Gemini CLI with its massive context window for analyzing project-wide patterns or complex SDK integrations.
 
-### File and Directory Inclusion Syntax
-
-Use the `@` syntax to include files and directories in Gemini prompts. Paths are relative to where you run the command:
+### Usage Examples
 
 ```bash
-# Single file analysis
-gemini -p "@handyHelper/ViewModels/AssemblyViewModel.swift Explain this file's purpose and structure"
+# Analyze the CardMax service layer
+gemini -p "@handyHelper/CardMax/Services/ Analyze the merchant detection pipeline"
 
-# Multiple files
-gemini -p "@PRODUCT_SPEC.md @ARCHITECTURE_DECISIONS.md Summarize the architectural decisions"
+# Verify Meta SDK usage across the project
+gemini -p "@handyHelper/ViewModels/ @handyHelper/Services/ Is the Meta SDK lifecycle correctly implemented?"
 
-# Entire directory
-gemini -p "@handyHelper/Services/ Analyze the service layer architecture"
+# Check reward calculation logic
+gemini -p "@handyHelper/CardMax/Models/CreditCard.swift How are rotating categories handled?"
 
-# Multiple directories
-gemini -p "@handyHelper/ViewModels/ @handyHelper/Services/ Analyze the MVVM implementation"
-
-# Current directory and subdirectories
+# Full project overview
 gemini -p "@./ Give me an overview of this entire project"
-
-# Or use --all_files flag
-gemini --all_files -p "Analyze the project structure and dependencies"
 ```
-
-### Implementation Verification Examples
-
-```bash
-# Check if a feature is implemented
-gemini -p "@handyHelper/ Has voice command handling been implemented? Show me the relevant files and functions"
-
-# Verify SDK integration
-gemini -p "@handyHelper/ViewModels/ @handyHelper/Services/ Is Meta Wearables SDK properly integrated? List all SDK-related patterns"
-
-# Check for specific patterns
-gemini -p "@handyHelper/ Are there any ViewModels that handle camera streaming? List them with file paths"
-
-# Verify error handling
-gemini -p "@handyHelper/Services/ Is proper error handling implemented for all services? Show examples of try-catch blocks"
-
-# Check for state management patterns
-gemini -p "@handyHelper/ViewModels/ How is MainActor used across ViewModels? Show the implementation details"
-
-# Verify ML integration
-gemini -p "@handyHelper/Services/Vision/ Is YOLOv8 CoreML integration complete? List all ML-related functions and their usage"
-
-# Check for specific security measures
-gemini -p "@handyHelper/ Are there proper permission checks before accessing camera? Show how permissions are handled"
-
-# Verify audio pipeline
-gemini -p "@handyHelper/Services/ @handyHelper/ViewModels/ How is TTS and speech recognition implemented? List all audio-related code"
-```
-
-### When to Use Gemini CLI
-
-Use `gemini -p` when:
-- Analyzing entire codebases or large directories
-- Comparing multiple large files
-- Need to understand project-wide patterns or architecture
-- Current context window is insufficient for the task
-- Working with files totaling more than 100KB
-- Verifying if specific features, patterns, or security measures are implemented
-- Checking for the presence of certain coding patterns across the entire codebase
 
 **Important Notes:**
-- Paths in `@` syntax are relative to your current working directory when invoking gemini
-- The CLI will include file contents directly in the context
-- No need for `--yolo` flag for read-only analysis
-- Gemini's context window can handle entire codebases that would overflow Claude's context
-- When checking implementations, be specific about what you're looking for to get accurate results
+- Paths in `@` syntax are relative to the project root.
+- The CLI includes file contents directly in the context for thorough analysis.
+- Use `gemini -p` for read-only research and architectural validation.

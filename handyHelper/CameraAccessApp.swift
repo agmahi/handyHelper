@@ -44,6 +44,9 @@ struct CameraAccessApp: App {
     let wearables = Wearables.shared
     self.wearables = wearables
     self._wearablesViewModel = StateObject(wrappedValue: WearablesViewModel(wearables: wearables))
+
+    // Configure shared CardMax service so Siri intents can use it
+    CardMaxService.shared.configure(wearables: wearables)
   }
 
   var body: some Scene {

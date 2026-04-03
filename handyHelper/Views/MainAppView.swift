@@ -21,15 +21,21 @@ import SwiftUI
 struct MainAppView: View {
   let wearables: WearablesInterface
   @ObservedObject private var viewModel: WearablesViewModel
+  @StateObject private var cardMaxViewModel: CardMaxViewModel
 
   init(wearables: WearablesInterface, viewModel: WearablesViewModel) {
     self.wearables = wearables
     self.viewModel = viewModel
+    self._cardMaxViewModel = StateObject(wrappedValue: CardMaxViewModel(wearables: wearables))
   }
 
   var body: some View {
     NavigationStack {
-      ManualHubView(wearables: wearables, wearablesVM: viewModel)
+      if viewModel.registrationState == .registered {
+        CardMaxView(viewModel: cardMaxViewModel, wearablesVM: viewModel)
+      } else {
+        HomeScreenView(viewModel: viewModel)
+      }
     }
   }
 }

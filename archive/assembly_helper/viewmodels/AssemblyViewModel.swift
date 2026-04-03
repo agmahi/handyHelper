@@ -6,7 +6,7 @@ import MWDATCore
 import UIKit
 
 @MainActor
-class AssemblyViewModel: ObservableObject, PartDetectionDelegate {
+class AssemblyViewModel: ObservableObject, PartDetectionDelegate, SpeechRecognizerDelegate {
     let manual: FurnitureManual
     let manager: ManualManager
     private let wearables: WearablesInterface
@@ -19,6 +19,7 @@ class AssemblyViewModel: ObservableObject, PartDetectionDelegate {
     @Published var detectedPartsBuffer: Set<String> = []
     @Published var streamError: String?
     @Published var isConnecting = true
+    @Published var speechService = SpeechRecognizerService()
     
     private let streamSession: StreamSession
     private let deviceSelector: AutoDeviceSelector
@@ -41,6 +42,8 @@ class AssemblyViewModel: ObservableObject, PartDetectionDelegate {
         self.streamSession = StreamSession(streamSessionConfig: config, deviceSelector: deviceSelector)
         
         detectionService.delegate = self
+        speechService.delegate = self
+        speechService.requestAuthorization()
         
         setupListeners()
     }
@@ -93,7 +96,11 @@ class AssemblyViewModel: ObservableObject, PartDetectionDelegate {
         } catch {
             self.streamError = "SDK Error: \(error.localizedDescription)"
         }
-        speakCurrentStep()
+        
+        // Delay our app's TTS so it doesn't overlap with the Meta hardware's "Experience Started" prompt
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            self.speakCurrentStep()
+        }
     }
     
     func exit() {
@@ -105,6 +112,7 @@ class AssemblyViewModel: ObservableObject, PartDetectionDelegate {
         deviceMonitorTask?.cancel()
         frameListener = nil
         stateListener = nil
+        speechService.stopListening()
         Task {
             await streamSession.stop()
         }
@@ -139,8 +147,26 @@ class AssemblyViewModel: ObservableObject, PartDetectionDelegate {
         utterance.voice = AVSpeechSynthesisVoice(language: "en-US")
         utterance.rate = 0.5
         synthesizer.speak(utterance)
+        
+        // Start listening for voice commands immediately after the TTS prompt finishes
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            self.speechService.startListening()
+        }
     }
     
+    // MARK: - SpeechRecognizerDelegate
+    func didHearCommand(_ command: VoiceCommand) {
+        switch command {
+        case .next:
+            moveNext()
+        case .back:
+            moveBack()
+        case .repeat:
+            speakCurrentStep()
+        }
+    }
+    
+    // MARK: - PartDetectionDelegate
     func partDetectionService(_ service: PartDetectionService, didUpdateDetections detections: [Detection]) {
         self.detections = detections
         
